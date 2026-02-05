@@ -1,4 +1,5 @@
 #include "kicadPcbDataBase.h"
+#include <regex>
 
 bool kicadPcbDataBase::buildKicadPcb()
 {
@@ -14,12 +15,25 @@ bool kicadPcbDataBase::buildKicadPcb()
     if (!parser.parseKicadPcb(&tree))
         return false;
     std::string treeFile = "in";
-    //parser.writeTree(tree, treeFile);
+    parser.writeTree(tree, treeFile);
+
+    // Regular expressions 
+    std::regex pcb_edge(PCB_LAYER_EDGE_CUT_STR);
+    std::regex inst("module|footprint");
+    std::regex reference("Reference");
+    std::regex topOrBottomLayer("Top|Bottom|F.Cu|B.Cu");
+
+    // Create default net class
+    // From  https://github.com/Huaqiu-Electronics/NextPCB-Manufacturing-Rules/blob/main/KiCad%20DRC%20Templates/Simple%20DRC/HQ%20NextPCB%20Simple.kicad_pro
+    double m_clearance = 0.2, m_trace_width = 0.2, m_via_dia = 0.6, m_via_drill = 0.3, m_uvia_dia = 0.5, m_uvia_drill = 0.3;
+    netclass the_netclass{0, "prapp_default", m_clearance, m_trace_width, m_via_dia, m_via_drill, m_uvia_dia, m_uvia_drill};
+    netclasses.push_back(the_netclass);
 
     std::stringstream ss;
     auto default_rule = rule{0.25, 0.25};
     for (auto &&sub_node : tree.m_branches)
     {
+	//std::cout << "node: " << sub_node.m_value << std::endl;
         //layer part
         if (sub_node.m_value == "layers")
         {
@@ -42,6 +56,7 @@ bool kicadPcbDataBase::buildKicadPcb()
             auto net_index = 0;
             auto net_name = sub_node.m_branches[1].m_value;
             get_value(ss, begin(sub_node.m_branches), net_index);
+	    std::cout << "Net: " << net_name << net_index << std::endl;
             net_id_to_name[net_index] = net_name;
             net_name_to_id[net_name] = net_index;
 
@@ -59,6 +74,14 @@ bool kicadPcbDataBase::buildKicadPcb()
                     name_to_diff_pair_net_map[name] = std::make_pair(net_index, -1);
                 }
             }
+
+            // Create the Net instance
+	    // Add to default net class
+            auto pair = std::make_pair(-1, -1);
+            nets.resize(net_id_to_name.size());
+	    //std::cout << "Creating net " << net_name << net_index << std::endl;
+            nets.at(net_index) = net(net_index, net_name, 0, pair);
+
         }
         //net class (Create Net Instances)
         else if (sub_node.m_value == "net_class")
@@ -110,7 +133,8 @@ bool kicadPcbDataBase::buildKicadPcb()
             netclasses.push_back(the_netclass);
         }
         // Create Module Instances
-        else if (sub_node.m_value == "module")
+        //else if (sub_node.m_value == "module")
+        else if (std::regex_search(sub_node.m_value,inst)) 
         {
             // Get Component Name
             std::string component_name;
@@ -119,6 +143,7 @@ bool kicadPcbDataBase::buildKicadPcb()
                 component_name = name[1];
             else
                 component_name = name[0];
+            //std::cout << "Comp \"" << component_name << std::endl;
 
             // Check if inst locked
             //TODO: refactor
@@ -165,6 +190,7 @@ bool kicadPcbDataBase::buildKicadPcb()
             {
                 comp_id = comp_it->second;
             }
+            //std::cout << "Comp ID" << comp_id << std::endl;
             component the_comp{comp_id, component_name};
             bool isBottomComp = false;
             int noNameId = 0;
@@ -196,13 +222,14 @@ bool kicadPcbDataBase::buildKicadPcb()
                         the_instance.m_angle = 0;
                 }
                 //TODO:: Handle (fp_text value ...)
-                if (module_node.m_value == "fp_text" && module_node.m_branches[0].m_value == "reference")
+                if (module_node.m_value == "property" && std::regex_search(module_node.m_branches[0].m_value,reference))
                 {
                     the_instance.m_name = module_node.m_branches[1].m_value;
                 }
                 // Create Component if needed
                 if (comp_it == component_name_to_id.end())
                 {
+		    //std::cout << "Creating component:  " << component_name << std::endl; 
                     if (module_node.m_value == "fp_line")
                     {
                         auto the_line = line{};
@@ -304,7 +331,8 @@ bool kicadPcbDataBase::buildKicadPcb()
                         {
                             for (auto &&layer_node : module_node.m_branches[5].m_branches)
                             {
-                                if (layer_node.m_value == "Top" || layer_node.m_value == "Bottom")
+                                //if (layer_node.m_value == "Top" || layer_node.m_value == "Bottom")
+                                if (std::regex_search(layer_node.m_value,topOrBottomLayer))
                                 {
                                     the_padstack.m_layers.push_back(layer_node.m_value);
                                 }
@@ -378,6 +406,7 @@ bool kicadPcbDataBase::buildKicadPcb()
 
             if (comp_it == component_name_to_id.end())
             {
+		//std::cout << "Pushing component:  " << component_name << std::endl; 
                 components.push_back(the_comp);
                 component_name_to_id[component_name] = comp_id;
             }
@@ -394,6 +423,7 @@ bool kicadPcbDataBase::buildKicadPcb()
                         pin_name = "Unnamed" + std::to_string(noNameId);
                         ++noNameId;
                     }
+                    //std::cout << "Pin Name" << pin_name << std::endl;
                     int net_index = 0;
                     std::string net_name = "";
                     bool connected = false;
@@ -403,6 +433,7 @@ bool kicadPcbDataBase::buildKicadPcb()
                         {
                             connected = true;
                             net_name = net_node.m_branches[1].m_value;
+                            //std::cout << "Net Name" << net_name << std::endl;
                             get_value(ss, begin(net_node.m_branches), net_index);
                             break;
                         }
@@ -426,8 +457,10 @@ bool kicadPcbDataBase::buildKicadPcb()
 
                     if (the_padstack.getType() == padType::SMD)
                     {
+                        //std::cout << "SMD" << std::endl;
                         for (auto &&layer_node : pad_node.m_branches[5].m_branches)
                         {
+                            //std::cout << layer_node.m_value << std::endl;
                             if (layer_node.m_value == "Top" || layer_node.m_value == "Bottom")
                             {
                                 the_pin.m_layers.push_back(this->getLayerId(layer_node.m_value));
@@ -436,6 +469,7 @@ bool kicadPcbDataBase::buildKicadPcb()
                     }
                     else if (the_padstack.getType() == padType::THRU_HOLE || the_padstack.getType() == padType::NP_THRU_HOLE)
                     {
+                        //std::cout << "THRU" << std::endl;
                         for (auto &&layer_node : pad_node.m_branches[6].m_branches)
                         {
                             if (layer_node.m_value == "*.Cu")
@@ -447,6 +481,7 @@ bool kicadPcbDataBase::buildKicadPcb()
                     }
                     else
                     {
+                        //std::cout << "layer_nodes" << std::endl;
                         for (auto &&layer_node : pad_node.m_branches[5].m_branches)
                         {
                             auto layerIte = layer_to_index_map.find(layer_node.m_value);
@@ -508,6 +543,63 @@ bool kicadPcbDataBase::buildKicadPcb()
             }
             if (l.m_layer == PCB_LAYER_EDGE_CUT_ID)
                 boundaryLines.push_back(l);
+        }
+        // GR rectangle
+        else if (sub_node.m_value == "gr_rect")
+        {
+            point_2d ll,ur;
+            std::string layer;
+            double width;
+
+	    line l0,l1,l2,l3;
+
+            for (auto &&boundary_node : sub_node.m_branches)
+            {
+                if (boundary_node.m_value == "start")
+                {
+                    get_2d(ss, begin(boundary_node.m_branches), ll.m_x, ll.m_y);
+                }
+                else if (boundary_node.m_value == "end")
+                {
+                    get_2d(ss, begin(boundary_node.m_branches), ur.m_x, ur.m_y);
+                }
+
+                else if (boundary_node.m_value == "layer")
+                {
+                    layer = boundary_node.m_branches[0].m_value;
+                }
+                else if (boundary_node.m_value == "width")
+                {
+                    get_value(ss, begin(boundary_node.m_branches), width);
+                }
+            }
+            if (std::regex_search(layer,pcb_edge)) {
+
+		// Create lines from Rect
+		l0.m_start.m_x = ll.m_x;
+		l0.m_start.m_y = ll.m_y;
+		l0.m_end.m_x = ur.m_x;
+		l0.m_end.m_y = ll.m_y;
+                boundaryLines.push_back(l0);
+
+		l1.m_start.m_x = ur.m_x;
+		l1.m_start.m_y = ll.m_y;
+		l1.m_end.m_x = ur.m_x;
+		l1.m_end.m_y = ur.m_y;
+                boundaryLines.push_back(l1);
+
+		l2.m_start.m_x = ur.m_x;
+		l2.m_start.m_y = ur.m_y;
+		l2.m_end.m_x = ll.m_x;
+		l2.m_end.m_y = ur.m_y;
+                boundaryLines.push_back(l2);
+
+		l3.m_start.m_x = ll.m_x;
+		l3.m_start.m_y = ur.m_y;
+		l3.m_end.m_x = ll.m_x;
+		l3.m_end.m_y = ll.m_y;
+                boundaryLines.push_back(l3);
+	    }
         }
         // TODO: belongs to Net Instance
         else if (sub_node.m_value == "segment")
@@ -644,11 +736,15 @@ bool kicadPcbDataBase::buildKicadPcb()
 
     for (auto &inst : instances)
     {
+                 
+        //std::cout << "inst: " << inst.m_name << std::endl;
         auto comp = components.at(inst.getComponentId());
+        //std::cout << "comp: " << comp.m_name << std::endl;
         for (auto &padstack : comp.getPadstacks())
         {
             auto m_x = padstack.m_pos.m_x;
             auto m_y = padstack.m_pos.m_y;
+  	    //std::cout << "Padstack:" << m_x << m_y << std::endl; 
             auto s = sin(inst.m_angle * -M_PI / 180);
             auto c = cos(inst.m_angle * -M_PI / 180);
             auto px = double((c * m_x - s * m_y) + inst.m_x);
@@ -665,14 +761,12 @@ bool kicadPcbDataBase::buildKicadPcb()
 
                 // //TEST
                 // if(instance.m_name == "IC6") {
-                // std::cout << "inst: " << instance.m_name << " comp: " << component.m_name << " pin: " << pin.m_name << " pin angle: " << pin.m_angle << " instance angle: " << instance.m_angle << std::endl;
-                // std::cout << "pin pos: (" << px << "," << py << ")" << pin.m_rule.m_radius << " " << pin.m_rule.m_clearance << std::endl;
+                // std::cout << "inst: " << inst.m_name << " comp: " << comp.m_name << "padstack angle: " <<  padstack.m_angle << " instance angle: " << inst.m_angle << std::endl;
+                // std::cout << "pin pos: (" << px << "," << py << ")" << std::endl;
                 // std::cout << "\t\n";
 
                 // for (auto &&cord : cords) {
                 // std::cout << "(" << cord.m_x << "," << cord.m_y << ")";
-                // }
-                // std::cout << std::endl;
                 // }
 
                 all_pads.push_back(pad{padstack.m_rule.m_radius, padstack.m_rule.m_clearance, tp, cords, padstack.m_size});
@@ -1436,6 +1530,7 @@ bool kicadPcbDataBase::getNet(const std::string &name, net *&net)
     }
     else
     {
+        std::cout << " No net named: " << name << std::endl;
         net = nullptr;
         return false;
     }
@@ -1444,6 +1539,7 @@ bool kicadPcbDataBase::getNet(const std::string &name, net *&net)
 net &kicadPcbDataBase::getNet(const std::string &name)
 {
     auto ite = net_name_to_id.find(name);
+    //std::cout << "ITE" << nets.size() << std::endl;
     return nets.at(ite->second);
 }
 
