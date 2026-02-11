@@ -21,6 +21,7 @@
 #include "segment.h"
 #include "shape.h"
 #include "tree.h"
+#include "point.h"
 #include "util.h"
 #include "via.h"
 
